@@ -129,6 +129,11 @@ DEFINE_int32(async_delete_dbs_frequency_sec,
 DEFINE_int32(async_delete_dbs_wait_sec,
              60,
              "How long in sec to wait between the dbs deletion");
+// Flags for ingest test only
+DEFINE_bool(ingest_test_noskip_hosting, true, "Do not skip ingest when DB already hosting same s3 path");
+DEFINE_bool(ingest_test_create_db_ingest_behind, true, "Create DBS with allow_ingest_behind");
+DEFINE_bool(ingest_test_overwrite_create_db_ingest_behind, false, "Create DB with allow_ingest_behind when overwrite existing DBs during ingestion");
+DEFINE_bool(ingest_behind, true, "Setup IngestExternalFileOptions.ingest_behind to be true");
 
 #if __GNUC__ >= 8
 using folly::CPUThreadPoolExecutor;
@@ -597,7 +602,12 @@ void AdminHandler::async_tm_addDB(
 
   // Open the actual rocksdb instance
   rocksdb::DB* rocksdb_db;
-  status = rocksdb::DB::Open(rocksdb_options_(segment), db_path, &rocksdb_db);
+//  status = rocksdb::DB::Open(rocksdb_options_(segment), db_path, &rocksdb_db);
+  auto options = rocksdb_options_(segment);
+  if (FLAGS_ingest_test_create_db_ingest_behind) {
+    options.allow_ingest_behind = true;
+  }
+  status = rocksdb::DB::Open(options, db_path, &rocksdb_db);
   if (!OKOrSetException(status,
                         AdminErrorCode::DB_ERROR,
                         &callback)) {
@@ -762,7 +772,12 @@ bool AdminHandler::restoreDBHelper(const std::string& db_name,
 
   rocksdb::DB* rocksdb_db;
   auto segment = admin::DbNameToSegment(db_name);
-  status = rocksdb::DB::Open(rocksdb_options_(segment), db_path, &rocksdb_db);
+//  status = rocksdb::DB::Open(rocksdb_options_(segment), db_path, &rocksdb_db);
+  auto db_options = rocksdb_options_(segment);
+  if (FLAGS_ingest_test_create_db_ingest_behind) {
+    db_options.allow_ingest_behind = true;
+  }
+  status = rocksdb::DB::Open(db_options, db_path, &rocksdb_db);
   if (!status.ok()) {
     e->errorCode = AdminErrorCode::DB_ERROR;
     e->message = status.ToString();
@@ -1189,7 +1204,12 @@ void AdminHandler::async_tm_restoreDBFromS3(
 
     rocksdb::DB* restore_db;
     auto segment = admin::DbNameToSegment(request->db_name);
-    auto status = rocksdb::DB::Open(rocksdb_options_(segment), formatted_local_path, &restore_db);
+//    auto status = rocksdb::DB::Open(rocksdb_options_(segment), formatted_local_path, &restore_db);
+    auto options = rocksdb_options_(segment);
+    if (FLAGS_ingest_test_create_db_ingest_behind) {
+      options.allow_ingest_behind = true;
+    }
+    auto status = rocksdb::DB::Open(options, formatted_local_path, &restore_db);
     if (!status.ok()) {
       OKOrSetException(status, AdminErrorCode::DB_ERROR, &callback);
       LOG(ERROR) << "Error happened when opening db via checkpoint: " << status.ToString();
@@ -1505,8 +1525,13 @@ void AdminHandler::async_tm_addS3SstFilesToDB(
   if (meta.__isset.s3_bucket && meta.s3_bucket == request->s3_bucket &&
       meta.__isset.s3_path && meta.s3_path == request->s3_path) {
     LOG(INFO) << "Already hosting " << meta.s3_bucket << "/" << meta.s3_path;
-    callback->result(AddS3SstFilesToDBResponse());
-    return;
+    if (FLAGS_ingest_test_noskip_hosting) {
+      LOG(INFO) << "During ingestion test, continue to ingest";
+    } else {
+      LOG(INFO) << "Skip ingest since already hosting";
+      callback->result(AddS3SstFilesToDBResponse());
+      return;
+    }
   }
 
   // The local data is not the latest, so we need to download the latest data
@@ -1545,8 +1570,13 @@ void AdminHandler::async_tm_addS3SstFilesToDB(
     request->s3_download_limit_mb = FLAGS_s3_download_limit_mb;
   }
   auto local_s3_util = createLocalS3Util(request->s3_download_limit_mb, request->s3_bucket);
+
+  common::Timer add_from_s3_timer(folly::stringPrintf("api_addS3FilesToDB db=%s", request->db_name.c_str()));
   auto responses = local_s3_util->getObjects(request->s3_path,
                                       local_path, "/", FLAGS_s3_direct_io);
+  common::Stats::get()->AddMetric(folly::stringPrintf("api_addS3FilesToDB_download db=%s", request->db_name.c_str()),
+      add_from_s3_timer.getElapsedTimeMs());
+
   if (!responses.Error().empty() || responses.Body().size() == 0) {
     e.message = "Failed to list any object from " + request->s3_path;
 
@@ -1619,6 +1649,9 @@ void AdminHandler::async_tm_addS3SstFilesToDB(
     LOG(INFO) << "Open DB: " << request->db_name;
     admin::AdminException e;
     e.errorCode = AdminErrorCode::DB_ADMIN_ERROR;
+    if (FLAGS_ingest_test_overwrite_create_db_ingest_behind) {
+      options.allow_ingest_behind = true;
+    }
     auto rocksdb_db = GetRocksdb(db_path, options);
     if (rocksdb_db == nullptr) {
       e.message = "Failed to open DB: " + request->db_name;
@@ -1637,11 +1670,15 @@ void AdminHandler::async_tm_addS3SstFilesToDB(
     db = getDB(request->db_name, nullptr);
   }
 
+  common::Timer ingest_timer(folly::stringPrintf("api_addS3FilesToDB_ingest db=%s", request->db_name.c_str()));
   rocksdb::IngestExternalFileOptions ifo;
   ifo.move_files = true;
   /* if true, rocksdb will allow for overlapping keys */
   ifo.allow_global_seqno = allow_overlapping_keys;
   ifo.allow_blocking_flush = allow_overlapping_keys;
+  if (FLAGS_ingest_behind) {
+    ifo.ingest_behind = true;
+  }
   auto status = db->rocksdb()->IngestExternalFile(sst_file_paths, ifo);
   if (!OKOrSetException(status,
                         AdminErrorCode::DB_ADMIN_ERROR,
