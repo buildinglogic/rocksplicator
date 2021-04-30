@@ -92,7 +92,7 @@ public class RestoreTaskFactory implements TaskFactory {
   private final String cluster;
   private final int adminPort;
   private final boolean useS3Store;
-  private final String s3Bucket;
+  private String s3Bucket;
 
   public RestoreTaskFactory(String cluster, int adminPort, boolean useS3Store, String s3Bucket) {
     this.cluster = cluster;
@@ -117,6 +117,9 @@ public class RestoreTaskFactory implements TaskFactory {
     try {
       Map<String, String> jobCmdMap = jobConfig.getJobCommandConfigMap();
       if (jobCmdMap != null && !jobCmdMap.isEmpty()) {
+        if (jobCmdMap.containsKey("S3_BUCKET")) {
+          this.s3Bucket = jobCmdMap.get("S3_BUCKET");
+        }
         if (jobCmdMap.containsKey("STORE_PATH_PREFIX")) {
           storePathPrefix = jobCmdMap.get("STORE_PATH_PREFIX");
         }

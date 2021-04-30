@@ -29,7 +29,7 @@ public class DedupTaskFactory implements TaskFactory {
   private final String cluster;
   private final int adminPort;
   private final boolean useS3Store;
-  private final String s3Bucket;
+  private String s3Bucket;
 
   private static final int DEFAULT_BACKUP_LIMIT_MBS = 64;
 
@@ -60,6 +60,9 @@ public class DedupTaskFactory implements TaskFactory {
     try {
       Map<String, String> jobCmdMap = jobConfig.getJobCommandConfigMap();
       if (jobCmdMap != null && !jobCmdMap.isEmpty()) {
+        if (jobCmdMap.containsKey("S3_BUCKET")) {
+          this.s3Bucket = jobCmdMap.get("S3_BUCKET");
+        }
         if (jobCmdMap.containsKey("SRC_STORE_PATH_PREFIX")) {
           srcStorePathPrefix = jobCmdMap.get("SRC_STORE_PATH_PREFIX");
         }
